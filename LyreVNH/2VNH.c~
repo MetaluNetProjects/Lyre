@@ -1,0 +1,309 @@
+/*********************************************************************
+ *
+ *                Lyre for 8X2A 
+ *
+ *********************************************************************
+ * Author               Date        Comment
+ *~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * Antoine Rousseau  jan 26 2013     Original.
+ ********************************************************************/
+//incremental encoders :
+/*#define MOTC_A K1
+#define MOTC_B K2
+#define MOTD_A K3
+#define MOTD_B K4
+
+//end switchs :
+#define MOTC_END K8
+#define MOTD_END K9*/
+
+/*
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA  02110-1301, USA.
+*/
+#define BOARD 8X2A
+
+#include <core.h>
+#include <fraisedevice.h>
+#include <eeparams.h>
+
+
+//#include <dcmotor.h>
+#include <pid.h>
+#include <ramp.h>
+#include <servo.h>
+#include <dcmot.h>
+#include <analog.h>
+#include <switch.h>
+#include <irbarrier.c>
+//-------------  Timer1 macros :  ---------------------------------------- 
+//prescaler=PS fTMR1=FOSC/(4*PS) nbCycles=0xffff-TMR1init T=nbCycles/fTMR1=(0xffff-TMR1init)*4PS/FOSC
+//TMR1init=0xffff-(T*FOSC/4PS) ; max=65536*4PS/FOSC : 
+//ex: PS=8 : T=0.01s : TMR1init=0xffff-15000
+//Maximum 1s !!
+#define	TMR1init(T) (0xffff-((T*FOSC)/32000)) //ms ; maximum: 8MHz:262ms 48MHz:43ms 64MHz:32ms
+#define	TMR1initUS(T) (0xffff-((T*FOSC)/32000000)) //us ; 
+#define InitTimer(T) do{ TMR1H=TMR1init(T)/256 ; TMR1L=TMR1init(T)%256; PIR1bits.TMR1IF=0; }while(0)
+#define InitTimerUS(T) do{ TMR1H=TMR1initUS(T)/256 ; TMR1L=TMR1initUS(T)%256; PIR1bits.TMR1IF=0; }while(0)
+#define TimerOut() (PIR1bits.TMR1IF)
+
+/*DCMOT_DECLARE(C);
+DCMOT_DECLARE(D);*/
+
+DCMOT_DECLARE(X);
+DCMOT_DECLARE(Y);
+
+long int TestVar,TestVar2;
+unsigned char t,t2;
+
+void HighInterrupts()
+{
+	Servo_ISR();
+
+	if(PIR1bits.TMR1IF) {
+		//UpdateLeds();
+		/*DCMOT_CAPTURE_SERVICE(C);
+		DCMOT_CAPTURE_SERVICE(D);*/
+		InitTimerUS(10);
+	}
+	IRbarrier_ISR();
+}
+
+void LowInterrupts()
+{}
+
+unsigned char PERIOD=25;
+unsigned char buf[13] = { 'B' }; //'B' + 3x4 chars
+unsigned char len = 0;
+int anVal;
+
+void main(void)
+{
+	unsigned long t3,servoSOF;
+		
+	CoreInit();
+	Switch_Init();
+	IRbarrier_Init();
+	/*SetPinAnsel(MOTC_END,0);
+	//SetPinAnsel(MOTC_A,0);
+	SetPinAnsel(MOTC_B,0);
+
+	SetPinAnsel(MOTD_END,0);
+	SetPinAnsel(MOTD_A,0);
+	SetPinAnsel(MOTD_B,0);*/
+	
+	/*DCMOT_INIT(C);
+	DCMOT_INIT(D);*/
+	
+
+// --------- init motors PWM on TMR2 -----------
+	// PWM on Timer2 : fPWM = fOSC / (TMR2prescale * 4 * (PR2+1))
+	//						= 64000000Hz/(4 * 4 * 256) = 15625Hz
+	CCP2CON=/*CCP1CON=*/0b00001100 ; // single PWM active high
+	T2CONbits.T2CKPS0=1; //prescaler 4
+	PR2=255;
+	T2CONbits.TMR2ON=1;
+
+// ------- init PWM1 to pulse MOTC_IN1
+	//PSTR1CON=0;
+	//PSTR1CONbits.STR1D=1;
+
+// ------- init PWM2 to pulse MOTD_EN
+
+	PSTR2CON=0;
+	PSTR2CONbits.STR2B=1;
+
+// ---------- capture timer : TMR1 ------------
+	T1CON=0b00110011;//src=fosc/4,ps=8,16bit r/w,on.
+	PIE1bits.TMR1IE=0;  //1;
+	IPR1bits.TMR1IP=1;
+
+
+// ---------- Servos ------------
+	Servo_Init();
+	
+	//SERVO_SET_PORT(0,K3);
+	
+	DCMOT_INIT(X);
+	DCMOT(X).Setting.PosWindow = 100;
+	DCMOT(X).Setting.PwmMin = 150;
+	DCMOT(X).Setting.PosErrorGain = 1;
+	
+	DCMOT(X).PosRamp.MaxSpeed = 2000;
+	DCMOT(X).PosRamp.MaxAccel = 5000;
+	DCMOT(X).PosRamp.MaxDecel = 5000;
+	Ramp_SetPos(&DCMOT(X).PosRamp, 16384);
+
+	DCMOT(X).PosPID.GainP = 90;
+	DCMOT(X).PosPID.GainI = 1;
+	DCMOT(X).PosPID.GainD = 0;
+	DCMOT(X).PosPID.MaxOut = 1023;
+
+	DCMOT(X).VolVars.homed = 1;
+	
+	DCMOT_INIT(Y);
+	DCMOT(Y).Setting.PosWindow = 100;
+	DCMOT(Y).Setting.PwmMin = 150;
+	DCMOT(Y).Setting.PosErrorGain = 1;
+	
+	DCMOT(Y).PosRamp.MaxSpeed = 2000;
+	DCMOT(Y).PosRamp.MaxAccel = 5000;
+	DCMOT(Y).PosRamp.MaxDecel = 5000;
+	Ramp_SetPos(&DCMOT(Y).PosRamp, 16384);
+
+	DCMOT(Y).PosPID.GainP = 90;
+	DCMOT(Y).PosPID.GainI = 1;
+	DCMOT(Y).PosPID.GainD = 0;
+	DCMOT(Y).PosPID.MaxOut = 1023;
+
+	DCMOT(Y).VolVars.homed = 1;
+
+	Analog_Init();
+	ANALOG_SELECT(MOTX_POSCHAN, MOTX_POS);
+	ANALOG_SELECT(MOTX_CSCHAN, MXCS);
+	ANALOG_SELECT(MOTY_POSCHAN, MOTY_POS);
+	ANALOG_SELECT(MOTY_CSCHAN, MYCS);
+	
+	EEreadMain();
+
+
+// ---------- Main loop ------------
+
+	t=PERIOD;
+	servoSOF=t3=GetTime();
+
+	while(1){
+		//ADService();
+		FraiseService();
+		Analog_Service();
+		FraiseService();
+		Servo_Service();
+		FraiseService();
+		Switch_Service();
+
+		if(Elapsed(servoSOF)>Micros(18000UL)) {
+			Servo_Rewind();
+			servoSOF=GetTime();
+		}
+
+		if(Elapsed(t3)>Micros(5000UL))
+		{
+			t3=GetTime();
+
+			//DCMOT_GETPOS(X) = Analog_Get(0);
+			if(!Switch_Send()) Analog_Send(AMODE_NUM);
+
+			/*anVal = Analog_Get(MOTX_POSCHAN);
+			if((anVal<2000) || (anVal>30000)) {
+				DCMOT(X).Vars.PWMConsign = 0; 
+				DCMOT(X).Setting.Mode = 0;
+			}
+			else DCMOT_GETPOS(X) = anVal;*/
+			//DCMOT_UPDATE_SYM(X);
+			DCMOT_COMPUTE(X, SYM);
+			DCMOT_COMPUTE(Y, SYM);
+
+			FraiseService();
+			//UpdateMotorD();
+			//DCMOT_COMPUTE(D, ASYM);
+			//FraiseService();
+			//ADService();
+			//UpdateMotorB();
+			//FraiseService();
+			//ADService();
+			if(!t--){
+				t=PERIOD;
+				t2++;
+				//printf("C AD0 %d\n", Analog_Get(0));
+				//anVal = Analog_Get(0);
+				len = 0;
+				buf[len++] = 'B';
+				buf[len++] = 200;
+				//buf[len++] = anVal >> 8;
+				//buf[len++] = anVal & 255;
+				buf[len++] = IRB1;
+				buf[len++] = IRB2;
+				buf[len++] = '\n';
+				FrTXPacket(buf,len);
+				#if 0
+				if(t2%2) printf("C MX %ld %ld %d %d\n",DCMOT_GETPOS(X),(long)(DCMOT(X).PosRamp.ConsignPos>>RAMP_UINCPOW), DCMOT(X).Vars.PWMConsign,DCMOT(X).VolVars.homed);
+				/*else printf("C MD %ld %ld %d %d\n",DCMOT_GETPOS(D),(long)(DCMOT(D).PosRamp.ConsignPos>>RAMP_UINCPOW), DCMOT(D).Vars.PWMConsign,DCMOT(D).VolVars.homed);*/
+				#endif
+			}
+		}
+	}
+}
+
+void CharBroadcast()
+{
+	/*unsigned char c;
+	
+	printf("Brdcst: ");
+	for(c=0;c<FrRXout_len;c++) printf("%c",FrRXgetchar());
+	putchar('\n');*/
+}
+
+void Broadcast()
+{
+	/*unsigned char c;
+	
+	printf("brdcst: ");
+	for(c=0;c<FrRXout_len;c++) printf("%d ",FrRXgetchar());
+	putchar('\n');*/
+}
+
+void CharInput()
+{
+	unsigned char c;
+	unsigned char l = FrRXlen();	
+	c=FrRXgetchar();
+	//printf("Cchar in:%c %c\n",c,c2);
+	if(c=='L'){	
+		c=FrRXgetchar();
+		/*if(c=='0') 
+			{LED=0;}
+		else LED=1;*/
+	}
+	else if(c=='E') {
+		printf("C");
+		for(c=1;c<l;c++) printf("%c",FrRXgetchar());
+		putchar('\n');
+	}	
+}
+
+
+void Input()
+{
+	unsigned char c;//,c2;
+	
+	c=FrRXgetchar();
+
+	switch(c) {
+		PARAM_CHAR(1,t2); break;
+		PARAM_CHAR(2,PERIOD); break;
+		case 20 : Servo_Input(); break;
+		case 21 : IRbarrier_Input(); break;
+		case 120 : DCMOT_INPUT(X); break;
+		case 121 : DCMOT_INPUT(Y); break;
+		
+		case 255 : EEwriteMain(); break;
+	}
+}
+
+void EEdeclareMain()
+{
+	//DCMOT_DECLARE_EE(X);
+	//DCMOT_DECLARE_EE(D);
+}
